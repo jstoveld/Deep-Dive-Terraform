@@ -10,7 +10,7 @@ terraform {
     organization = "deep-dive-js"
 
     workspaces {
-      name = "globo-networking"
+      name = "web-network-dev"
     }
   }
 }
