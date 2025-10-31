@@ -5,4 +5,13 @@ terraform {
       version = "~>5.0"
     }
   }
+
+  cloud {
+    organization = "deep-dive-js"
+
+    workspaces {
+      name = "web-network-dev"
+    }
+  }
 }
+
