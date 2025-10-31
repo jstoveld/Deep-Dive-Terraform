@@ -7,15 +7,16 @@ This repository uses GitHub Actions for continuous integration and deployment of
 
 ### 1. Terraform CI/CD (`terraform.yml`)
 **Triggers:**
-- Push to `main` branch
-- Pull requests to `main` branch
+- Push to `main` branch (only when `globo-networking/` files change)
+- Pull requests to `main` branch (only when `globo-networking/` files change)
 
 **Features:**
-- Multi-directory support (matrix strategy)
+- Single directory focus (globo-networking) to prevent multiple runs
 - Security scanning with Checkov
 - Terraform plan comments on PRs
 - Automatic apply on main branch
 - Format and validation checks
+- Concurrency control to prevent overlapping runs
 
 **Required Secrets:**
 - `TF_API_TOKEN`: Terraform Cloud API token
@@ -52,72 +53,64 @@ Ensure the following permissions are enabled:
    - Require branches to be up to date before merging
    - Include administrators
 
-## Workflow Details
+## Key Features to Prevent Multiple Runs
 
-### Matrix Strategy
-The workflow runs against multiple directories:
-- `globo-networking`: Main networking configuration
-- `m7/application_config_example`: Application example
-- `m9/application_config_complete`: Complete application config
+### Path-Based Filtering
+The workflow only runs when files in `globo-networking/` change:
+```yaml
+on:
+  push:
+    paths:
+      - 'globo-networking/**'
+```
 
-### Security Features
-- **Checkov**: Scans for Terraform security issues
-- **Trivy**: Scans for vulnerabilities in the codebase
-- **SARIF uploads**: Results appear in GitHub Security tab
+### Concurrency Control
+Prevents multiple workflow runs from the same ref:
+```yaml
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+```
 
-### Plan Comments
-On pull requests, the workflow will:
-1. Generate Terraform plans for each directory
-2. Comment on the PR with plan details
-3. Show what resources will be created/modified/destroyed
-
-### Auto-Apply
-- Only runs on pushes to `main` branch
-- Applies the previously generated plan
-- Uses `-auto-approve` flag
+### Single Directory Focus
+- Targets only `globo-networking` directory
+- Uses `working-directory: globo-networking`
+- Avoids matrix strategy that creates multiple jobs
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **Missing TF_API_TOKEN**
+1. **Workflows Not Running**
+   - Ensure workflows are in `.github/workflows/` at repository root
+   - Check that file changes match the `paths` filter
+   - Verify workflow files have `.yml` or `.yaml` extension
+
+2. **Multiple Terraform Cloud Runs**
+   - This should now be resolved with single directory focus
+   - Concurrency control prevents overlapping runs
+   - Path filtering ensures minimal triggers
+
+3. **Missing TF_API_TOKEN**
    - Ensure the secret is set in repository settings
    - Token must have appropriate Terraform Cloud permissions
 
-2. **Workspace Not Found**
+4. **Workspace Not Found**
    - Verify workspace names in `terraform.tf` files
    - Ensure workspaces exist in Terraform Cloud
 
-3. **Plan Failures**
-   - Check AWS credentials configuration
-   - Verify Terraform Cloud workspace settings
-   - Review variable definitions
-
-### Monitoring
+## Monitoring
 - Check the Actions tab for workflow runs
 - Review Security tab for scan results
 - Monitor Terraform Cloud for apply status
 
-## Customization
-
-### Adding New Directories
-Update the matrix strategy in `terraform.yml`:
-```yaml
-strategy:
-  matrix:
-    directory: [
-      'globo-networking',
-      'm7/application_config_example',
-      'm9/application_config_complete',
-      'your-new-directory'  # Add here
-    ]
+## File Structure
 ```
-
-### Changing Terraform Version
-Update the setup-terraform action:
-```yaml
-- name: Setup Terraform
-  uses: hashicorp/setup-terraform@v3
-  with:
-    terraform_version: ~1.7.0  # Change version here
+.github/
+  workflows/
+    terraform.yml    # Main Terraform CI/CD
+    security.yml     # Security scanning
+globo-networking/    # Target directory for Terraform
+  terraform.tf       # Terraform configuration
+  ...
 ```
