@@ -1,0 +1,159 @@
+name: 'Terraform CI/CD'
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'globo-networking/**'
+      - '.github/workflows/terraform.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'globo-networking/**'
+      - '.github/workflows/terraform.yml'
+
+env:
+  TF_LOG: INFO
+  TF_INPUT: false
+  TF_IN_AUTOMATION: true
+
+# Prevent concurrent runs to avoid multiple Terraform Cloud executions
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    name: 'Terraform (Networking)'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: globo-networking
+
+    steps:
+    # Checkout the repository to the GitHub Actions runner
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    # Install the preferred version of Terraform CLI 
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ~1.6.0
+        cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+    # Security scanning with Checkov
+    - name: Run Checkov action
+      id: checkov
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: globo-networking
+        framework: terraform
+        output_format: sarif
+        output_file_path: reports/results.sarif
+        soft_fail: true
+
+    # Initialize a new or existing Terraform working directory
+    - name: Terraform Init
+      id: init
+      run: terraform init
+      continue-on-error: false
+
+    # Run terraform fmt for push
+    - name: Terraform Format
+      id: fmt
+      run: terraform fmt -check -recursive
+      continue-on-error: true
+
+    # Run terraform validate
+    - name: Terraform Validate
+      id: validate
+      run: terraform validate
+      continue-on-error: false
+
+    # Generate Terraform plan
+    - name: Terraform Plan
+      id: plan
+      run: |
+        terraform plan -no-color -out=tfplan
+        terraform show -no-color tfplan > plan.txt
+      continue-on-error: false
+
+    # Comment on PR with plan results
+    - name: Comment PR
+      uses: actions/github-script@v7
+      if: github.event_name == 'pull_request'
+      with:
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+          
+          // Read the plan file
+          const planPath = path.join('globo-networking', 'plan.txt');
+          let plan = '';
+          try {
+            plan = fs.readFileSync(planPath, 'utf8');
+          } catch (error) {
+            plan = 'Could not read plan file: ' + error.message;
+          }
+          
+          // Truncate plan if too long
+          if (plan.length > 65000) {
+            plan = plan.substring(0, 65000) + '\n\n... (truncated)';
+          }
+          
+          const output = `#### Terraform Plan for \`globo-networking\` 📖
+          <details><summary>Show Plan</summary>
+          
+          \`\`\`terraform
+          ${plan}
+          \`\`\`
+          
+          </details>
+          
+          *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Workflow: \`${{ github.workflow }}\`*`;
+          
+          // Find existing comment to update instead of creating multiple
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+          
+          const existingComment = comments.find(comment => 
+            comment.body.includes('#### Terraform Plan for `globo-networking`')
+          );
+          
+          if (existingComment) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: existingComment.id,
+              body: output
+            });
+          } else {
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+          }
+
+    # Apply Terraform configuration (only on main branch)
+    - name: Terraform Apply
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: terraform apply -auto-approve tfplan
+
+    # Upload security scan results
+    - name: Upload Checkov results to GitHub Advanced Security Dashboard
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: reports/results.sarif
