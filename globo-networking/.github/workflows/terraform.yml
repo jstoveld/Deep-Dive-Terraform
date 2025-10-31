@@ -1,44 +1,136 @@
-name: 'Terraform'
+name: 'Terraform CI/CD'
 
-on: push
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 env:
   TF_LOG: INFO
   TF_INPUT: false
+  TF_IN_AUTOMATION: true
 
 jobs:
   terraform:
     name: 'Terraform'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
 
-    # Use the Bash shell regardless whether the GitHub Actions runner is 
-    # ubuntu-latest, macos-latest, or windows-latest
+    strategy:
+      matrix:
+        directory: [
+          'globo-networking',
+          'm7/application_config_example',
+          'm9/application_config_complete'
+        ]
+
     defaults:
       run:
         shell: bash
+        working-directory: ${{ matrix.directory }}
 
     steps:
     # Checkout the repository to the GitHub Actions runner
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     # Install the preferred version of Terraform CLI 
     - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v2
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ~1.6.0
+        cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
 
-    # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
+    # Security scanning with Checkov
+    - name: Run Checkov action
+      id: checkov
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: ${{ matrix.directory }}
+        framework: terraform
+        output_format: sarif
+        output_file_path: reports/results.sarif
+        soft_fail: true
+
+    # Initialize a new or existing Terraform working directory
     - name: Terraform Init
       id: init
       run: terraform init
+      continue-on-error: false
 
-    # Run a terraform fmt for push
+    # Run terraform fmt for push
     - name: Terraform Format
       id: fmt
-      run: terraform fmt -check
+      run: terraform fmt -check -recursive
+      continue-on-error: true
 
-    # Run a terraform validate
-    # Run even if formatting fails
+    # Run terraform validate
     - name: Terraform Validate
       id: validate
-      if: (success() || failure())
       run: terraform validate
+      continue-on-error: false
+
+    # Generate Terraform plan
+    - name: Terraform Plan
+      id: plan
+      run: |
+        terraform plan -no-color -out=tfplan
+        terraform show -no-color tfplan > plan.txt
+      continue-on-error: false
+
+    # Comment on PR with plan results
+    - name: Comment PR
+      uses: actions/github-script@v7
+      if: github.event_name == 'pull_request'
+      with:
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+          
+          // Read the plan file
+          const planPath = path.join('${{ matrix.directory }}', 'plan.txt');
+          let plan = '';
+          try {
+            plan = fs.readFileSync(planPath, 'utf8');
+          } catch (error) {
+            plan = 'Could not read plan file';
+          }
+          
+          // Truncate plan if too long
+          if (plan.length > 65000) {
+            plan = plan.substring(0, 65000) + '\n\n... (truncated)';
+          }
+          
+          const output = `#### Terraform Plan for \`${{ matrix.directory }}\` 📖
+          <details><summary>Show Plan</summary>
+          
+          \`\`\`terraform
+          ${plan}
+          \`\`\`
+          
+          </details>
+          
+          *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Workflow: \`${{ github.workflow }}\`*`;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: output
+          })
+
+    # Apply Terraform configuration (only on main branch)
+    - name: Terraform Apply
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: terraform apply -auto-approve tfplan
+
+    # Upload security scan results
+    - name: Upload Checkov results to GitHub Advanced Security Dashboard
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: reports/results.sarif
